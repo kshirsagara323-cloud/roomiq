@@ -1,0 +1,218 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function hasRole(role) {
+      return signedIn()
+        && exists(userPath(request.auth.uid))
+        && get(userPath(request.auth.uid)).data.role == role;
+    }
+    function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+    function optStr(d, k, max) { return !(k in d) || isStr(d[k], 0, max); }
+
+    // ---------- users (private profile, role is locked after signup) ----------
+    match /users/{uid} {
+      allow get: if isSelf(uid);
+      allow create: if isSelf(uid)
+        && request.resource.data.keys().hasOnly(['uid', 'name', 'email', 'phone', 'city', 'role', 'createdAt'])
+        && request.resource.data.keys().hasAll(['uid', 'name', 'email', 'role', 'createdAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.role in ['tenant', 'owner']
+        && isStr(request.resource.data.name, 1, 80)
+        && isStr(request.resource.data.email, 3, 160)
+        && request.resource.data.email == request.auth.token.email
+        && optStr(request.resource.data, 'phone', 20)
+        && optStr(request.resource.data, 'city', 60)
+        && request.resource.data.createdAt == request.time;
+      allow update: if isSelf(uid)
+        && request.resource.data.keys().hasOnly(['uid', 'name', 'email', 'phone', 'city', 'role', 'createdAt'])
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt
+        && isStr(request.resource.data.name, 1, 80)
+        && optStr(request.resource.data, 'phone', 20)
+        && optStr(request.resource.data, 'city', 60);
+      allow delete: if false;
+
+      // saved listings – only the user can see or change their own list
+      match /saved/{pid} {
+        allow read, delete: if isSelf(uid);
+        allow create: if isSelf(uid) && request.resource.data.keys().hasOnly(['createdAt']);
+      }
+    }
+
+    // ---------- properties ----------
+    function validProperty(d) {
+      return d.keys().hasOnly(['ownerId', 'ownerName', 'name', 'description', 'city', 'area', 'type', 'gender',
+                               'price', 'deposit', 'beds', 'amenities', 'images', 'lat', 'lng', 'status',
+                               'verified', 'ratingSum', 'ratingCount', 'available', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['ownerId', 'ownerName', 'name', 'description', 'city', 'area', 'type', 'gender',
+                            'price', 'amenities', 'images', 'lat', 'lng', 'status', 'verified',
+                            'ratingSum', 'ratingCount', 'createdAt'])
+        && isStr(d.name, 3, 100)
+        && isStr(d.description, 0, 2000)
+        && isStr(d.city, 2, 60)
+        && isStr(d.area, 2, 120)
+        && d.type in ['PG', 'Hostel', 'Flat']
+        && d.gender in ['Boys', 'Girls', 'Any']
+        && d.price is number && d.price > 0 && d.price <= 1000000
+        && (!('deposit' in d) || (d.deposit is number && d.deposit >= 0 && d.deposit <= 5000000))
+        && (!('beds' in d) || (d.beds is number && d.beds >= 0 && d.beds <= 500))
+        && d.amenities is list && d.amenities.size() <= 20
+        && d.images is list && d.images.size() <= 6
+        && d.lat is number && d.lat >= -90 && d.lat <= 90
+        && d.lng is number && d.lng >= -180 && d.lng <= 180
+        && d.status in ['active', 'paused']
+        && optStr(d, 'available', 40);
+    }
+
+    match /properties/{pid} {
+      // public can only see active listings; owners always see their own
+      allow get, list: if resource.data.status == 'active'
+        || (signedIn() && resource.data.ownerId == request.auth.uid);
+
+      allow create: if hasRole('owner')
+        && validProperty(request.resource.data)
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.verified == false
+        && request.resource.data.ratingSum == 0
+        && request.resource.data.ratingCount == 0
+        && request.resource.data.createdAt == request.time;
+
+      // owner edits – can never touch owner, verified badge, rating totals or creation time
+      allow update: if signedIn() && resource.data.ownerId == request.auth.uid
+        && validProperty(request.resource.data)
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.verified == resource.data.verified
+        && request.resource.data.ratingSum == resource.data.ratingSum
+        && request.resource.data.ratingCount == resource.data.ratingCount
+        && request.resource.data.createdAt == resource.data.createdAt;
+
+      // tenant review bumps the rating totals – only by exactly their (already-written) review
+      allow update: if hasRole('tenant')
+        && resource.data.status == 'active'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingSum', 'ratingCount'])
+        && request.resource.data.ratingCount == resource.data.ratingCount + 1
+        && existsAfter(/databases/$(database)/documents/properties/$(pid)/reviews/$(request.auth.uid))
+        && request.resource.data.ratingSum == resource.data.ratingSum
+             + getAfter(/databases/$(database)/documents/properties/$(pid)/reviews/$(request.auth.uid)).data.rating;
+
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+
+      match /reviews/{rid} {
+        allow read: if true;
+        // one review per tenant per listing (doc id = uid), cannot be edited or deleted
+        allow create: if hasRole('tenant')
+          && rid == request.auth.uid
+          && request.resource.data.keys().hasOnly(['uid', 'name', 'rating', 'comment', 'createdAt'])
+          && request.resource.data.uid == request.auth.uid
+          && isStr(request.resource.data.name, 1, 80)
+          && request.resource.data.rating is int
+          && request.resource.data.rating >= 1 && request.resource.data.rating <= 5
+          && isStr(request.resource.data.comment, 0, 500)
+          && request.resource.data.createdAt == request.time
+          && getAfter(/databases/$(database)/documents/properties/$(pid)).data.ratingCount
+               == get(/databases/$(database)/documents/properties/$(pid)).data.ratingCount + 1;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------- tour / booking requests ----------
+    match /bookings/{bid} {
+      allow read: if signedIn()
+        && (resource.data.tenantId == request.auth.uid || resource.data.ownerId == request.auth.uid);
+
+      allow create: if hasRole('tenant')
+        && request.resource.data.keys().hasOnly(['propertyId', 'propertyName', 'ownerId', 'tenantId', 'tenantName',
+                                                 'tenantPhone', 'visitDate', 'message', 'status', 'createdAt'])
+        && request.resource.data.tenantId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && isStr(request.resource.data.propertyId, 1, 60)
+        && isStr(request.resource.data.propertyName, 1, 100)
+        && isStr(request.resource.data.tenantName, 1, 80)
+        && optStr(request.resource.data, 'tenantPhone', 20)
+        && isStr(request.resource.data.visitDate, 10, 10)
+        && isStr(request.resource.data.message, 0, 500)
+        && request.resource.data.createdAt == request.time
+        && get(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.ownerId
+             == request.resource.data.ownerId;
+
+      // owner: pending -> confirmed/declined.  tenant: cancel their own request.
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && (
+          (resource.data.ownerId == request.auth.uid && resource.data.status == 'pending'
+             && request.resource.data.status in ['confirmed', 'declined'])
+          ||
+          (resource.data.tenantId == request.auth.uid && resource.data.status in ['pending', 'confirmed']
+             && request.resource.data.status == 'cancelled')
+        );
+      allow delete: if false;
+    }
+
+    // ---------- chat (tenant <-> owner only) ----------
+    match /conversations/{cid} {
+      allow get: if signedIn() && (resource == null || request.auth.uid in resource.data.participants);
+      allow list: if signedIn() && request.auth.uid in resource.data.participants;
+
+      allow create: if hasRole('tenant')
+        && request.resource.data.keys().hasOnly(['propertyId', 'propertyName', 'ownerId', 'ownerName', 'tenantId',
+                                                 'tenantName', 'participants', 'lastMessage', 'updatedAt', 'createdAt'])
+        && request.resource.data.tenantId == request.auth.uid
+        && cid == request.resource.data.propertyId + '_' + request.auth.uid
+        && request.resource.data.participants.size() == 2
+        && request.resource.data.participants[0] == request.auth.uid
+        && request.resource.data.participants[1] == request.resource.data.ownerId
+        && get(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.ownerId
+             == request.resource.data.ownerId
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if signedIn() && request.auth.uid in resource.data.participants
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'updatedAt'])
+        && isStr(request.resource.data.lastMessage, 0, 120);
+      allow delete: if false;
+
+      match /messages/{mid} {
+        allow read: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(cid)).data.participants;
+        allow create: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(cid)).data.participants
+          && request.resource.data.keys().hasOnly(['senderId', 'text', 'createdAt'])
+          && request.resource.data.senderId == request.auth.uid
+          && isStr(request.resource.data.text, 1, 1000)
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------- roommate profiles (opt-in, tenants only, no email/phone) ----------
+    match /roommates/{uid} {
+      allow read: if hasRole('tenant');
+      allow create, update: if isSelf(uid) && hasRole('tenant')
+        && request.resource.data.keys().hasOnly(['uid', 'name', 'city', 'budget', 'gender', 'sameGenderOnly', 'sleep',
+                                                 'clean', 'social', 'smoker', 'diet', 'bio', 'contact', 'updatedAt'])
+        && request.resource.data.uid == uid
+        && isStr(request.resource.data.name, 1, 80)
+        && isStr(request.resource.data.city, 2, 60)
+        && request.resource.data.budget is number && request.resource.data.budget > 0 && request.resource.data.budget <= 1000000
+        && request.resource.data.gender in ['Male', 'Female', 'Other']
+        && request.resource.data.sameGenderOnly is bool
+        && request.resource.data.sleep in ['early', 'night', 'flexible']
+        && request.resource.data.clean is int && request.resource.data.clean >= 1 && request.resource.data.clean <= 5
+        && request.resource.data.social is int && request.resource.data.social >= 1 && request.resource.data.social <= 5
+        && request.resource.data.smoker is bool
+        && request.resource.data.diet in ['veg', 'nonveg', 'any']
+        && isStr(request.resource.data.bio, 0, 200)
+        && isStr(request.resource.data.contact, 0, 60);
+      allow delete: if isSelf(uid);
+    }
+
+    // everything else is closed
+    match /{document=**} { allow read, write: if false; }
+  }
+}
