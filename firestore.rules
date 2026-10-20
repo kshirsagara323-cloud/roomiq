@@ -14,6 +14,11 @@ service cloud.firestore {
     function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
     function optStr(d, k, max) { return !(k in d) || isStr(d[k], 0, max); }
 
+    // free beds of a listing, before and after the current write (used to stop double booking)
+    function propPath(pid) { return /databases/$(database)/documents/properties/$(pid); }
+    function bedsNow(pid) { return get(propPath(pid)).data.get('beds', 0); }
+    function bedsAfter(pid) { return getAfter(propPath(pid)).data.get('beds', 0); }
+
     // ---------- users (private profile, role is locked after signup) ----------
     match /users/{uid} {
       allow get: if isSelf(uid);
@@ -140,16 +145,29 @@ service cloud.firestore {
         && isStr(request.resource.data.message, 0, 500)
         && request.resource.data.createdAt == request.time
         && get(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.ownerId
-             == request.resource.data.ownerId;
+             == request.resource.data.ownerId
+        // no tour requests once the listing is fully booked
+        && bedsNow(request.resource.data.propertyId) > 0;
 
-      // owner: pending -> confirmed/declined.  tenant: cancel their own request.
+      // owner confirms (must use exactly one free bed in the SAME transaction), declines,
+      // or cancels a confirmed booking (frees the bed again).  tenant cancels a pending request.
       allow update: if signedIn()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'note'])
+        && (!('note' in request.resource.data) || isStr(request.resource.data.note, 0, 80))
         && (
           (resource.data.ownerId == request.auth.uid && resource.data.status == 'pending'
-             && request.resource.data.status in ['confirmed', 'declined'])
+             && request.resource.data.status == 'confirmed'
+             && bedsNow(resource.data.propertyId) > 0
+             && bedsAfter(resource.data.propertyId) == bedsNow(resource.data.propertyId) - 1)
           ||
-          (resource.data.tenantId == request.auth.uid && resource.data.status in ['pending', 'confirmed']
+          (resource.data.ownerId == request.auth.uid && resource.data.status == 'pending'
+             && request.resource.data.status == 'declined')
+          ||
+          (resource.data.ownerId == request.auth.uid && resource.data.status == 'confirmed'
+             && request.resource.data.status == 'cancelled'
+             && bedsAfter(resource.data.propertyId) == bedsNow(resource.data.propertyId) + 1)
+          ||
+          (resource.data.tenantId == request.auth.uid && resource.data.status == 'pending'
              && request.resource.data.status == 'cancelled')
         );
       allow delete: if false;

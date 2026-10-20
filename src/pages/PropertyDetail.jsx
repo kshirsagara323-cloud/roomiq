@@ -31,6 +31,7 @@ export default function PropertyDetail() {
   if (!p) return <div className="container page"><Empty title="Listing not found" text="It may have been removed or paused by the owner."><Link className="btn primary" to="/explore">Back to stays</Link></Empty></div>;
 
   const isMine = user && p.ownerId === user.uid;
+  const full = (Number(p.beds) || 0) < 1;
   const isTenant = role === 'tenant';
   const alreadyReviewed = user && reviews.some((r) => r.id === user.uid);
   const needLogin = () => nav('/login', { state: { from: `/property/${id}` } });
@@ -68,6 +69,7 @@ export default function PropertyDetail() {
 
   const bookTour = async (e) => {
     e.preventDefault();
+    if (full) return toast('This place is fully booked.', 'err');
     if (!visit.date || visit.date < todayISO()) return toast('Pick a visit date from today onwards.', 'err');
     setBooking(true);
     try {
@@ -124,6 +126,7 @@ export default function PropertyDetail() {
             <span className="pill">{p.type}</span>
             {p.gender !== 'Any' && <span className="pill">{p.gender} only</span>}
             {p.verified && <span className="pill ok"><BadgeCheck size={14} /> Verified</span>}
+            {full && <span className="pill warn">Fully booked</span>}
             {p.status !== 'active' && <span className="pill warn">Paused – only you can see this</span>}
           </div>
           <h1>{p.name}</h1>
@@ -136,7 +139,7 @@ export default function PropertyDetail() {
           <div className="facts">
             <div><small>Monthly rent</small><b>{formatINR(p.price)}</b></div>
             <div><small>Deposit</small><b>{p.deposit ? formatINR(p.deposit) : '—'}</b></div>
-            <div><small>Beds free</small><b>{p.beds ?? '—'}</b></div>
+            <div><small>Beds free</small><b>{full ? 'Fully booked' : p.beds}</b></div>
             <div><small>Availability</small><b>{p.available || 'Ask owner'}</b></div>
           </div>
 
@@ -180,7 +183,9 @@ export default function PropertyDetail() {
               </button>
               <hr />
               <strong>Book a tour</strong>
-              {isTenant ? (
+              {isTenant && full ? (
+                <p className="muted">This place is fully booked right now. You can still chat with the owner or save it for later.</p>
+              ) : isTenant ? (
                 <form onSubmit={bookTour} className="stack">
                   <Field label="Visit date"><input type="date" min={todayISO()} value={visit.date} onChange={(e) => setVisit({ ...visit, date: e.target.value })} required /></Field>
                   <Field label="Message (optional)"><textarea rows={3} maxLength={500} value={visit.message} onChange={(e) => setVisit({ ...visit, message: e.target.value })} placeholder="Preferred time, questions…" /></Field>

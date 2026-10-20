@@ -56,8 +56,8 @@ export default function TenantDashboard() {
         <div className="list">
           {bookings.map((b) => (
             <div className="card pad row between wrap gap" key={b.id}>
-              <div><Link to={`/property/${b.propertyId}`}><strong>{b.propertyName}</strong></Link><p className="muted">Visit on {b.visitDate}</p>{b.message && <p>“{b.message}”</p>}</div>
-              <div className="row gap"><StatusPill s={b.status} />{['pending', 'confirmed'].includes(b.status) && <button className="btn ghost" onClick={() => cancel(b.id)}>Cancel</button>}</div>
+              <div><Link to={`/property/${b.propertyId}`}><strong>{b.propertyName}</strong></Link><p className="muted">Visit on {b.visitDate}</p>{b.message && <p>“{b.message}”</p>}{b.note && <p className="muted">{b.note === 'Room filled' ? 'Declined – the room was filled by another tenant.' : b.note}</p>}</div>
+              <div className="row gap"><StatusPill s={b.status} />{b.status === 'pending' && <button className="btn ghost" onClick={() => cancel(b.id)}>Cancel</button>}</div>
             </div>
           ))}
         </div>

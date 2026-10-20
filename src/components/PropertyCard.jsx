@@ -27,6 +27,7 @@ export default function PropertyCard({ p }) {
       <div className="prop-img">
         {p.images?.[0] ? <img src={p.images[0]} alt={p.name} loading="lazy" /> : <div className="noimg">No photo yet</div>}
         <span className="chip-tl">{p.type}{p.gender !== 'Any' ? ` · ${p.gender}` : ''}</span>
+        {(Number(p.beds) || 0) < 1 && <span className="chip-tl" style={{ top: 'auto', bottom: 10, background: '#b91c1c', color: '#fff' }}>Fully booked</span>}
         {role !== 'owner' && (
           <button className={`heart ${saved ? 'on' : ''}`} onClick={onSave} aria-label="Save stay">
             <Heart size={18} />

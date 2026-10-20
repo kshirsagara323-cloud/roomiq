@@ -1,125 +1,103 @@
-// Imports your real IT_Cities_Property_Data.csv into Firestore.
-// Needs scripts/serviceAccountKey.json (see README step 8).
-// Usage:  npm run import-data              (import everything)
-//         npm run import-data -- --limit=300   (import only the first 300 – good for a quick test)
+// Imports real listings from data/IT_Cities_Property_Data.csv into Firestore.
+// Needs scripts/serviceAccountKey.json (README step 8).
+//
+//   npm run import-data -- --per-city=30     import 30 listings per city (recommended)
+//   npm run import-data -- --clear           delete everything this script imported earlier
 import admin from 'firebase-admin';
 import { parse } from 'csv-parse/sync';
 import { existsSync, readFileSync } from 'node:fs';
 
 const keyPath = new URL('./serviceAccountKey.json', import.meta.url);
 const csvPath = new URL('../data/IT_Cities_Property_Data.csv', import.meta.url);
-if (!existsSync(keyPath)) { console.error('Missing scripts/serviceAccountKey.json – see README step 8.'); process.exit(1); }
-if (!existsSync(csvPath)) { console.error('Missing data/IT_Cities_Property_Data.csv – copy it in first.'); process.exit(1); }
-
+if (!existsSync(keyPath)) { console.error('Missing scripts/serviceAccountKey.json'); process.exit(1); }
 admin.initializeApp({ credential: admin.credential.cert(JSON.parse(readFileSync(keyPath, 'utf8'))) });
 const db = admin.firestore();
 const auth = admin.auth();
+const OWNER_NAME = 'RoomIQ Verified Listings';
 
-const limitArg = process.argv.find((a) => a.startsWith('--limit='));
-const LIMIT = limitArg ? Number(limitArg.split('=')[1]) : Infinity;
+if (process.argv.includes('--clear')) {
+  const snap = await db.collection('properties').where('ownerName', '==', OWNER_NAME).get();
+  for (let i = 0; i < snap.docs.length; i += 450) {
+    const b = db.batch();
+    snap.docs.slice(i, i + 450).forEach((d) => b.delete(d.ref));
+    await b.commit();
+  }
+  console.log(`Removed ${snap.size} imported listings.`);
+  process.exit(0);
+}
+if (!existsSync(csvPath)) { console.error('Missing data/IT_Cities_Property_Data.csv'); process.exit(1); }
 
-// CSV cities aren't consistently capitalised – map them onto the app's city list.
-const CITY_MAP = { pune: 'Pune', mumbai: 'Mumbai', bengaluru: 'Bengaluru', bangalore: 'Bengaluru', hyderabad: 'Hyderabad', delhi: 'Delhi', chennai: 'Chennai', kolkata: 'Kolkata', ahmedabad: 'Ahmedabad' };
+const arg = process.argv.find((a) => a.startsWith('--per-city='));
+const PER_CITY = arg ? Number(arg.split('=')[1]) : 30;
 
-// Real, free-to-use stock photos, grouped by the kind of place so each listing gets a fitting one.
-const FLAT_PHOTOS = [
-  'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1560185127-6ed189bf02f4?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?auto=format&fit=crop&w=1200&q=80',
-];
-const HOUSE_PHOTOS = [
-  'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1600566753086-00f18fb6b3ea?auto=format&fit=crop&w=1200&q=80',
-];
-const PG_PHOTOS = [
-  'https://images.unsplash.com/photo-1616486338812-3dadae4b4ace?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1512917774080-9991f1c4c750?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&w=1200&q=80',
-  'https://images.unsplash.com/photo-1493809842364-78817add7ffb?auto=format&fit=crop&w=1200&q=80',
-];
+// every city label that appears in the CSV -> the name shown in the app
+const CITY_MAP = { bengaluru: 'Bengaluru', bangalore: 'Bengaluru', pune: 'Pune', mumbai: 'Mumbai', hyderabad: 'Hyderabad', newdelhi: 'New Delhi', delhi: 'New Delhi', indore: 'Indore', chennai: 'Chennai', gurugram: 'Gurugram', noida: 'Noida' };
 
-const pickPhotos = (bookingType, i) => {
-  const pool = bookingType === 'house' ? (i % 3 === 0 ? FLAT_PHOTOS : HOUSE_PHOTOS) : PG_PHOTOS;
-  return [pool[i % pool.length], pool[(i + 1) % pool.length], pool[(i + 2) % pool.length]];
+const FLAT = ['photo-1600585154340-be6161a56a0c', 'photo-1560448204-e02f11c3d0e2', 'photo-1560185127-6ed189bf02f4', 'photo-1522708323590-d24dbb6b0267'];
+const HOUSE = ['photo-1600607687939-ce8a6c25118c', 'photo-1600607687920-4e2a09cf159d', 'photo-1502672260266-1c1ef2d93688', 'photo-1600566753086-00f18fb6b3ea'];
+const PG = ['photo-1616486338812-3dadae4b4ace', 'photo-1512917774080-9991f1c4c750', 'photo-1522771739844-6a9f6d5f14af', 'photo-1493809842364-78817add7ffb'];
+const url = (id) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=1200&q=80`;
+const photos = (bookingType, i) => {
+  const pool = bookingType === 'house' ? (i % 3 === 0 ? FLAT : HOUSE) : PG;
+  return [0, 1, 2].map((k) => url(pool[(i + k) % pool.length]));
 };
 
-const genderFrom = (availableFor = '') => {
-  const s = availableFor.toLowerCase();
-  const boys = s.includes('boys'), girls = s.includes('girls');
-  if (boys && !girls) return 'Boys';
-  if (girls && !boys) return 'Girls';
-  return 'Any';
-};
+const genderFrom = (s = '') => { s = s.toLowerCase(); const b = s.includes('boys'), g = s.includes('girls'); return b && !g ? 'Boys' : g && !b ? 'Girls' : 'Any'; };
+const facilities = (raw) => (String(raw || '').match(/'([^']*)'|"([^"]*)"/g) || []).map((x) => x.replace(/['"]/g, ''));
+const AMEN = { ac: 'AC', wifi: 'WiFi', security: 'CCTV', 'power backup': 'Power Backup', parking: 'Parking', gym: 'Gym', 'washing machine': 'Washing Machine', fridge: 'Refrigerator', refrigerator: 'Refrigerator', geyser: 'Geyser', housekeeping: 'Housekeeping', laundry: 'Laundry' };
+const amenities = (f) => [...new Set(f.map((x) => AMEN[x.toLowerCase()]).filter(Boolean))];
 
-const parseFacilities = (raw) => {
-  try {
-    return String(raw || '[]').replace(/'/g, '"').match(/"([^"]*)"/g)?.map((s) => s.replace(/"/g, '')).slice(0, 12) || [];
-  } catch { return []; }
-};
-
-// this app's amenity chips are a fixed set – map whatever the CSV says onto the closest ones
-const AMENITY_MAP = { ac: 'AC', wifi: 'WiFi', security: 'CCTV', 'power backup': 'Power Backup', parking: 'Parking', gym: 'Gym', 'washing machine': 'Washing Machine', fridge: 'Refrigerator', tv: 'Study Table', geyser: 'Geyser', housekeeping: 'Housekeeping' };
-const mapAmenities = (facilities) => [...new Set(facilities.map((f) => AMENITY_MAP[f.toLowerCase()]).filter(Boolean))];
-
-async function ensureImportOwner() {
+async function owner() {
   const email = 'dataset-import@roomiq.example';
-  let user;
-  try { user = await auth.getUserByEmail(email); }
-  catch { user = await auth.createUser({ email, password: 'not-used-' + Date.now(), displayName: 'RoomIQ Verified Listings', emailVerified: true }); }
-  await db.doc(`users/${user.uid}`).set({ uid: user.uid, name: 'RoomIQ Verified Listings', email, role: 'owner', createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-  return user.uid;
+  let u;
+  try { u = await auth.getUserByEmail(email); }
+  catch { u = await auth.createUser({ email, password: `x${Date.now()}Aa1!`, displayName: OWNER_NAME, emailVerified: true }); }
+  await db.doc(`users/${u.uid}`).set({ uid: u.uid, name: OWNER_NAME, email, role: 'owner', createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  return u.uid;
 }
 
-const csv = readFileSync(csvPath, 'utf8');
-const rows = parse(csv, { columns: true, skip_empty_lines: true, relax_column_count: true });
-console.log(`Read ${rows.length} rows from the CSV.`);
-
-const ownerId = await ensureImportOwner();
-let batch = db.batch();
-let count = 0, written = 0, skipped = 0;
-
-for (const [i, r] of rows.entries()) {
-  if (written >= LIMIT) break;
+const rows = parse(readFileSync(csvPath, 'utf8'), {
+  bom: true,
+  delimiter: '\t',
+  columns: true,
+  skip_empty_lines: true,
+  relax_column_count: true,
+});
+const good = [];
+rows.forEach((r, i) => {
   const city = CITY_MAP[String(r.city || '').trim().toLowerCase()];
   const lat = Number(r.lat), lng = Number(r.long);
-  const price = Number(r['minRoomRent(Rs)'] || r['minRent(Rs)']);
-  if (!city || !Number.isFinite(lat) || !Number.isFinite(lng) || !(price > 0)) { skipped++; continue; }
+  const price = [r['minRoomRent(Rs)'], r['minRent(Rs)']].map(Number).find((n) => n > 0);
+  if (city && Number.isFinite(lat) && Number.isFinite(lng) && lat && lng && price) good.push({ r, i, city, lat, lng, price });
+});
+console.log(`${rows.length} rows read, ${good.length} usable.`);
 
-  const facilities = parseFacilities(r.facilities);
-  const type = r.bookingType === 'house' ? 'Flat' : (String(r.houseType || '').toLowerCase().includes('hostel') ? 'Hostel' : 'PG');
-  const id = `csv-${r.id || i}`;
+// take the best-described listings of each city so every city has data
+const byCity = {};
+good.forEach((g) => (byCity[g.city] ||= []).push(g));
+const picked = Object.values(byCity).flatMap((list) => list.sort((a, b) => String(b.r.description).length - String(a.r.description).length).slice(0, PER_CITY));
 
-  batch.set(db.doc(`properties/${id}`), {
-    ownerId,
-    ownerName: 'RoomIQ Verified Listings',
-    name: (r.title || `${type} in ${r.address || city}`).slice(0, 100),
-    description: (r.description || '').slice(0, 2000),
-    city,
-    area: (r.address || city).slice(0, 120),
-    type,
+const ownerId = await owner();
+let batch = db.batch(), n = 0, total = 0;
+for (const { r, i, city, lat, lng, price } of picked) {
+  const f = facilities(r.facilities);
+  const type = r.bookingType === 'house' ? 'Flat' : 'PG';
+  batch.set(db.doc(`properties/csv-${r.id || i}`), {
+    ownerId, ownerName: OWNER_NAME,
+    name: String(r.title || `${type} in ${city}`).slice(0, 100),
+    description: String(r.description || '').slice(0, 2000),
+    city, area: String(r.address || city).slice(0, 120), type,
     gender: genderFrom(r.availableFor),
     price: Math.round(price),
     deposit: Math.round(Number(r['minRoomAdvance(Rs)']) || 0),
-    beds: Number(r.bedAvailable || r.roomAvailable) || 0,
-    amenities: mapAmenities(facilities),
-    images: pickPhotos(r.bookingType, i),
-    lat, lng,
-    status: 'active',
-    verified: true,
-    ratingSum: 0,
-    ratingCount: 0,
-    available: 'Available now',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    beds: Number(r.bedAvailable) || Number(r.roomAvailable) || 1, // '0' is a non-empty string, so the old `||` kept 0 for ~75% of rows
+    amenities: amenities(f), images: photos(r.bookingType, i), lat, lng,
+    status: 'active', verified: false, ratingSum: 0, ratingCount: 0, available: 'Available now',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
-
-  count++; written++;
-  if (count === 450) { await batch.commit(); batch = db.batch(); count = 0; console.log(`...${written} written`); }
+  total++;
+  if (++n === 450) { await batch.commit(); batch = db.batch(); n = 0; }
 }
-if (count) await batch.commit();
-
-console.log(`\nDone. Wrote ${written} listings, skipped ${skipped} rows with missing city/price/coordinates.`);
+if (n) await batch.commit();
+console.log(`Imported ${total} listings across ${Object.keys(byCity).length} cities (${PER_CITY} max per city).`);
 process.exit(0);
